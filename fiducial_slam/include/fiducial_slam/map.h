@@ -58,6 +58,13 @@
 
 #include <fiducial_slam/transform_with_variance.h>
 
+#include <boost/foreach.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/xml_parser.hpp>
+#include <math.h>
+#include <algorithm>
+
 // An observation of a single fiducial in a single image
 class Observation {
 public:
@@ -147,6 +154,7 @@ public:
     bool loadMap(std::string filename);
     bool saveMap();
     bool saveMap(std::string filename);
+    bool loadSVGMap(std::string filename);
 
     void publishTf();
     void publishMap();

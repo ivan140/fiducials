@@ -46,7 +46,6 @@
 
 #include <boost/filesystem.hpp>
 
-
 static double systematic_error = 0.01;
 
 // Constructor for observation
@@ -135,15 +134,17 @@ Map::Map(ros::NodeHandle &nh) : tfBuffer(ros::Duration(30.0)) {
     boost::filesystem::path dir = mapPath.parent_path();
     boost::filesystem::create_directories(dir);
 
-    std::string initialMap;
+    std::string initialMap, svgMap;
     nh.param<std::string>("initial_map_file", initialMap, "");
+    nh.param<std::string>("svg_map_file", svgMap, "");
 
-    if (!initialMap.empty()) {
+    if (!svgMap.empty()) {
+        loadSVGMap(svgMap);
+    } else if (!initialMap.empty()) {
         loadMap(initialMap);
     } else {
         loadMap();
     }
-
     publishMarkers();
 }
 
@@ -487,7 +488,6 @@ void Map::autoInit(const std::vector<Observation> &obs, const ros::Time &time) {
 // Attempt to add the specified fiducial to the map
 
 void Map::handleAddFiducial(const std::vector<Observation> &obs) {
-
     if (fiducialToAdd == -1) {
         return;
     }
@@ -502,7 +502,6 @@ void Map::handleAddFiducial(const std::vector<Observation> &obs) {
     for (const Observation &o : obs) {
         if (o.fid == fiducialToAdd) {
             ROS_INFO("Adding fiducial_id %d to map", fiducialToAdd);
-
 
             tf2::Stamped<TransformWithVariance> T = o.T_camFid;
 
@@ -624,6 +623,102 @@ bool Map::loadMap(std::string filename) {
     return true;
 }
 
+bool Map::loadSVGMap(std::string filename) {
+    int numRead = 0;
+
+    ROS_INFO("Load map %s", filename.c_str());
+
+    boost::property_tree::ptree pt;
+    boost::property_tree::read_xml(filename, pt);
+    try {
+        typedef boost::property_tree::ptree::value_type vt;
+        BOOST_FOREACH (vt const &nodes, pt.get_child("svg")) {
+            if (nodes.first == "g") {
+                const boost::property_tree::ptree &g = nodes.second;
+                if (g.count("rect") != 0) {
+                    std::pair<boost::property_tree::ptree::const_assoc_iterator,
+                              boost::property_tree::ptree::const_assoc_iterator>
+                        bounds = g.equal_range("rect");
+
+                    for (boost::property_tree::ptree::const_assoc_iterator it = bounds.first;
+                         it != bounds.second; ++it) {
+                        if (std::stoi(it->second.get_child("<xmlattr>.width").data()) == 10 &&
+                            std::stoi(it->second.get_child("<xmlattr>.height").data()) == 10) {
+                            boost::property_tree::ptree yaw;
+                            float tx, ty, rz;
+                            tx = std::stof(it->second.get_child("<xmlattr>.x").data()) +
+                                 std::stoi(it->second.get_child("<xmlattr>.width").data()) / 2;
+                            ty = std::stof(it->second.get_child("<xmlattr>.y").data()) +
+                                 std::stoi(it->second.get_child("<xmlattr>.height").data()) / 2;
+                            if (it->second.get_child_optional("<xmlattr>.transform")) {
+                                yaw = it->second.get_child("<xmlattr>.transform");
+                                yaw.data().erase(
+                                    std::remove_if(
+                                        yaw.data().begin(), yaw.data().end(),
+                                        [](const char c) { return c == '(' || c == ')'; }),
+                                    yaw.data().end());
+                                yaw.data() = yaw.data().substr(
+                                    6, yaw.data().size());  // delete "rotate" substring
+                                rz = std::stof(yaw.data());
+                            } else {
+                                rz = 0.0;  //roll (6 column)
+                            }
+                            if (rz >= 360)
+                                rz -= 360;
+                            else if (rz < 0)
+                                rz += 360;
+                            float rotated_x =
+                                round((tx * cos((rz + 180) * (M_PI / 180)) - ty * sin((rz + 180) * (M_PI / 180))) *
+                                      1000) /
+                                1000;
+                            float rotated_y =
+                                round((tx * sin((rz + 180) * (M_PI / 180)) + ty * cos((rz + 180) * (M_PI / 180))) *
+                                      1000) /
+                                1000;
+                            const boost::property_tree::ptree &z = it->second;
+                            int id = 0;
+                            if (z.count("title") != 0) {
+                                std::pair<boost::property_tree::ptree::const_assoc_iterator,
+                                          boost::property_tree::ptree::const_assoc_iterator>
+                                    t = z.equal_range("title");
+                                for (boost::property_tree::ptree::const_assoc_iterator i = t.first;
+                                     i != t.second; ++i) {
+                                    id = std::stoi(i->second.data());
+                                }
+                            }
+
+                            double tz = 0;
+                            double rx = 180.0;  // pan (4 column)
+                            double ry = -0.0;  // tilt (5 column)
+                            double var = 0.001;
+                            int numObs = 10;
+                            rotated_x = rotated_x / 100;
+                            rotated_y = -rotated_y / 100;
+                            tf2::Vector3 tvec(rotated_x, rotated_y, tz);
+                            tf2::Quaternion q;
+                            q.setRPY(deg2rad(rx), deg2rad(ry), deg2rad(rz));
+
+                            auto twv = TransformWithVariance(tvec, q, var);
+                            Fiducial f = Fiducial(id, tf2::Stamped<TransformWithVariance>(
+                                                          twv, ros::Time::now(), mapFrame));
+                            f.numObs = numObs;
+                            fiducials[id] = f;
+
+                            // printf("%d %f %f 0 0 0 %f 0.001 10\n", id, rotated_x, rotated_y, rz);
+                            numRead++;
+                        }
+                    }
+                }
+            }
+        }
+        ROS_INFO("Load map %s read %d entries", filename.c_str(), numRead);
+        return true;
+    } catch (boost::property_tree::xml_parser_error) {
+        std::cout << "XML parser error!" << std::endl;
+
+        throw;
+    }
+}
 // Publish the map
 
 void Map::publishMap() {
